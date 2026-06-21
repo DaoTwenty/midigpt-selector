@@ -8,6 +8,9 @@ let audio = null;        // HTMLAudioElement
 let secA = { start: 0, end: 8 };
 let secB = { start: 16, end: 24 };
 
+// Beat offset — shifts playback and exported bar values (in beats, 4 beats = 1 bar in 4/4)
+let beatOffset = 0;
+
 // Drag state
 let drag = null;         // {handle: 'a-start'|'a-end'|'b-start'|'b-end', startX, origVal}
 let playStopAt = null;   // setTimeout id for auto-stop
@@ -106,6 +109,8 @@ function renderSongView() {
   const bpm  = song.bpm ?? 120;
   const insts = (song.instruments ?? []).slice(0, 5).join(", ");
 
+  beatOffset = 0;   // reset offset when switching songs
+
   main.innerHTML = `
     <div class="song-header">
       <h1>${song.artist} — ${song.title}</h1>
@@ -153,6 +158,14 @@ function renderSongView() {
             <button class="btn-play stop" onclick="stopAudio()">■ Stop</button>
           </div>
         </div>
+      </div>
+
+      <div class="offset-row">
+        <span class="offset-label">Beat offset</span>
+        <button class="offset-btn" onclick="changeBeatOffset(-1)">−</button>
+        <span class="offset-val" id="offset-val">0 beats</span>
+        <button class="offset-btn" onclick="changeBeatOffset(+1)">+</button>
+        <span class="offset-hint" id="offset-hint"></span>
       </div>
 
       <button class="btn-add" id="btn-add" onclick="addToQueue()">
@@ -301,10 +314,27 @@ function onTimeUpdate() {
   if (ph) ph.style.left = pct + "%";
 }
 
+/* ── Beat offset ─────────────────────────────────────────── */
+function changeBeatOffset(delta) {
+  beatOffset = Math.max(-8, Math.min(8, beatOffset + delta));
+  const el   = document.getElementById("offset-val");
+  const hint = document.getElementById("offset-hint");
+  if (el) el.textContent = `${beatOffset > 0 ? "+" : ""}${beatOffset} beat${Math.abs(beatOffset) !== 1 ? "s" : ""}`;
+  if (hint) {
+    const bpm     = song?.bpm ?? 120;
+    const barFrac = beatOffset / 4;
+    const secShift = beatOffset * (60 / bpm);
+    hint.textContent = beatOffset === 0
+      ? ""
+      : `(${barFrac > 0 ? "+" : ""}${barFrac.toFixed(2)} bars · ${secShift > 0 ? "+" : ""}${secShift.toFixed(2)}s)`;
+  }
+}
+
 /* ── Audio playback ──────────────────────────────────────── */
 function barToSec(bar) {
-  const bpm = song?.bpm ?? 120;
-  return bar * (60 / bpm) * 4;
+  const bpm        = song?.bpm ?? 120;
+  const offsetSec  = beatOffset * (60 / bpm);   // beat offset in seconds
+  return bar * (60 / bpm) * 4 + offsetSec;
 }
 
 function playSection(which) {
@@ -315,9 +345,9 @@ function playSection(which) {
   }
   clearTimeout(playStopAt);
 
-  const sec = which === "a" ? secA : secB;
-  const startSec = barToSec(sec.start);
-  const endSec   = barToSec(sec.end);
+  const sec      = which === "a" ? secA : secB;
+  const startSec = Math.max(0, barToSec(sec.start));
+  const endSec   = Math.max(0, barToSec(sec.end));
 
   audio.currentTime = startSec;
   audio.play().catch(err => console.warn("Play failed:", err));
@@ -334,15 +364,17 @@ function stopAudio() {
 /* ── Queue ───────────────────────────────────────────────── */
 function addToQueue() {
   if (!song) return;
+  const offsetBars = beatOffset / 4;   // beat offset expressed in bars
   queue.push({
-    slug:    song.slug,
-    artist:  song.artist,
-    title:   song.title,
-    bpm:     song.bpm,
-    midi:    song.midi_path ?? "",
-    secA:    { ...secA },
-    secB:    { ...secB },
-    addedAt: Date.now(),
+    slug:        song.slug,
+    artist:      song.artist,
+    title:       song.title,
+    bpm:         song.bpm,
+    midi:        song.midi_path ?? "",
+    secA:        { start: secA.start + offsetBars, end: secA.end + offsetBars },
+    secB:        { start: secB.start + offsetBars, end: secB.end + offsetBars },
+    beatOffset,
+    addedAt:     Date.now(),
   });
   renderQueue();
 }
@@ -378,6 +410,7 @@ function renderQueue() {
       <div class="qi-range">
         <span class="pill a">A ${Math.round(q.secA.start)}→${Math.round(q.secA.end)}</span>
         <span class="pill b">B ${Math.round(q.secB.start)}→${Math.round(q.secB.end)}</span>
+        ${q.beatOffset ? `<span style="font-size:10px;color:var(--muted)">offset ${q.beatOffset > 0 ? "+" : ""}${q.beatOffset}b</span>` : ""}
       </div>
     </div>`).join("");
 }
