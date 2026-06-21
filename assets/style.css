@@ -116,32 +116,40 @@ select { background: var(--surface2); border: 1px solid var(--border); border-ra
   display: block;
 }
 
-/* Section regions */
-.tl-region {
-  position: absolute;
-  top: 0; bottom: 0;
-  pointer-events: none;
-  display: flex; align-items: center; justify-content: center;
-  z-index: 2;
-}
-.tl-region.sec-a { background: rgba(59,130,246,.25); border-left: 2px solid var(--sec-a); border-right: 2px solid var(--sec-a); }
-.tl-region.sec-b { background: rgba(34,197,94,.25);  border-left: 2px solid var(--sec-b);  border-right: 2px solid var(--sec-b); }
-.tl-region .region-label { font-size: 10px; font-weight: 700; color: #fff; opacity: .8; letter-spacing: .05em; }
-
-/* Drag handles */
-.tl-handle {
+/* Section colour blocks */
+#tl-sections { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+.tl-section {
   position: absolute; top: 0; bottom: 0;
-  width: 12px; margin-left: -6px;
+  display: flex; align-items: flex-end; padding-bottom: 4px;
+}
+.tl-sec-label {
+  font-size: 10px; font-weight: 700; letter-spacing: .05em;
+  padding-left: 5px; opacity: .9;
+}
+
+/* Boundary marker handles */
+#tl-markers { position: absolute; inset: 0; pointer-events: none; z-index: 8; }
+.tl-marker {
+  position: absolute; top: 0; bottom: 0;
+  width: 16px; margin-left: -8px;
   cursor: col-resize;
-  z-index: 10;
+  pointer-events: all;
+}
+.tl-marker-line {
+  position: absolute; left: 7px; top: 0; bottom: 0;
+  width: 2px; background: rgba(255,255,255,.55);
+}
+.tl-marker-del {
+  position: absolute; top: 3px; left: 2px;
+  width: 12px; height: 12px; border-radius: 50%;
+  background: #ef4444; color: #fff;
+  font-size: 9px; line-height: 1; border: none;
   display: flex; align-items: center; justify-content: center;
+  opacity: 0; cursor: pointer; pointer-events: all;
+  transition: opacity .15s;
 }
-.tl-handle::after {
-  content: '';
-  width: 3px; height: 32px; border-radius: 2px;
-}
-.tl-handle.a-start::after, .tl-handle.a-end::after { background: var(--sec-a); }
-.tl-handle.b-start::after, .tl-handle.b-end::after { background: var(--sec-b); }
+.tl-marker:hover .tl-marker-line { background: rgba(255,255,255,.9); }
+.tl-marker:hover .tl-marker-del  { opacity: 1; }
 
 /* Playhead */
 .tl-playhead {
@@ -161,35 +169,22 @@ select { background: var(--surface2); border: 1px solid var(--border); border-ra
   transform: translateX(-50%);
 }
 
-/* Section display below timeline */
-.section-info {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 10px;
+/* Section chips below timeline */
+.sections-list {
+  display: flex; flex-wrap: wrap; gap: 8px;
   margin-top: 10px;
 }
-.sec-box {
+.section-chip {
   background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 8px; padding: 10px 14px;
-  display: flex; flex-direction: column; gap: 6px;
+  border-radius: 8px; padding: 8px 12px;
+  display: flex; flex-direction: column; gap: 3px;
+  cursor: pointer; transition: border-color .15s, background .15s;
+  min-width: 90px;
 }
-.sec-box.sec-a-box { border-color: rgba(59,130,246,.4); }
-.sec-box.sec-b-box { border-color: rgba(34,197,94,.4); }
-.sec-box .sec-name { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; }
-.sec-box.sec-a-box .sec-name { color: var(--sec-a); }
-.sec-box.sec-b-box .sec-name { color: var(--sec-b); }
-.sec-box .sec-range { font-size: 13px; color: var(--text); font-variant-numeric: tabular-nums; }
-.sec-box .sec-dur   { font-size: 11px; color: var(--muted); }
-
-.play-row { display: flex; gap: 8px; align-items: center; }
-.btn-play {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 7px 14px; border-radius: 6px; border: 1px solid;
-  font-size: 12px; font-weight: 600; cursor: pointer;
-  transition: opacity .15s, transform .1s;
-}
-.btn-play:active { transform: scale(.97); }
-.btn-play.a { background: rgba(59,130,246,.12); border-color: rgba(59,130,246,.4); color: var(--sec-a); }
-.btn-play.b { background: rgba(34,197,94,.12);  border-color: rgba(34,197,94,.4);  color: var(--sec-b); }
-.btn-play.stop { background: var(--surface2); border-color: var(--border); color: var(--muted); }
+.section-chip:hover { background: var(--surface); }
+.sc-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; }
+.sc-range { font-size: 12px; color: var(--text); font-variant-numeric: tabular-nums; }
+.sc-dur   { font-size: 11px; color: var(--muted); }
 
 /* Beat offset row */
 .offset-row {

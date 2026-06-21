@@ -1,21 +1,23 @@
-/* ── State ───────────────────────────────────────────────── */
-let SONGS = [];          // from songs.json
-let song  = null;        // currently selected song entry
-let queue = [];          // [{song, secA, secB}, …]
-let audio = null;        // HTMLAudioElement
-let noteData = null;     // loaded from notes/{slug}.json for piano roll
-let canvasRO = null;     // ResizeObserver for canvas
-
-// Sections in BAR units (floats)
-let secA = { start: 0, end: 8 };
-let secB = { start: 16, end: 24 };
-
-// Beat offset — shifts playback and exported bar values (in beats, 4 beats = 1 bar in 4/4)
+/* ── State ────────────────────────────────────────────────── */
+let SONGS      = [];
+let song       = null;
+let queue      = [];
+let audio      = null;
+let noteData   = null;
+let canvasRO   = null;
+let markers    = [];   // sorted bar positions of internal section boundaries
 let beatOffset = 0;
+let drag       = null; // {markerIdx, rect, nb}
+let playStopAt = null;
 
-// Drag state
-let drag = null;         // {handle: 'a-start'|'a-end'|'b-start'|'b-end', startX, origVal}
-let playStopAt = null;   // setTimeout id for auto-stop
+const SEC_COLORS = [
+  { bg: "rgba(59,130,246,.18)",  border: "#3b82f6" },
+  { bg: "rgba(34,197,94,.18)",   border: "#22c55e" },
+  { bg: "rgba(251,191,36,.18)",  border: "#fbbf24" },
+  { bg: "rgba(249,115,22,.18)",  border: "#f97316" },
+  { bg: "rgba(168,85,247,.18)",  border: "#a855f7" },
+  { bg: "rgba(236,72,153,.18)",  border: "#ec4899" },
+];
 
 /* ── Boot ────────────────────────────────────────────────── */
 document.addEventListener("DOMContentLoaded", async () => {
@@ -32,13 +34,28 @@ document.addEventListener("DOMContentLoaded", async () => {
   }
 
   document.getElementById("stat-songs").textContent = SONGS.length;
-
-  document.getElementById("search").addEventListener("input", e => {
+  document.getElementById("search").addEventListener("input", e =>
     renderSongList(e.target.value.toLowerCase(),
-                   document.getElementById("genre-filter").value);
+                   document.getElementById("genre-filter").value));
+  document.getElementById("genre-filter").addEventListener("change", e =>
+    renderSongList(document.getElementById("search").value.toLowerCase(), e.target.value));
+
+  // Global drag handlers — added once to avoid stacking on song switches
+  document.addEventListener("mousemove", e => {
+    if (!drag) return;
+    const nb  = drag.nb;
+    const pct = Math.max(0, Math.min(1, (e.clientX - drag.rect.left) / drag.rect.width));
+    let b = Math.round(pct * nb);
+    const prev = drag.markerIdx > 0 ? markers[drag.markerIdx - 1] : 0;
+    const next = drag.markerIdx < markers.length - 1 ? markers[drag.markerIdx + 1] : nb;
+    b = Math.max(prev + 2, Math.min(next - 2, b));
+    markers[drag.markerIdx] = b;
+    updateTimeline();
   });
-  document.getElementById("genre-filter").addEventListener("change", e => {
-    renderSongList(document.getElementById("search").value.toLowerCase(), e.target.value);
+  document.addEventListener("mouseup", () => {
+    if (!drag) return;
+    drag = null;
+    document.body.style.cursor = "";
   });
 
   buildGenreFilter();
@@ -50,12 +67,9 @@ document.addEventListener("DOMContentLoaded", async () => {
 /* ── Sidebar ─────────────────────────────────────────────── */
 function buildGenreFilter() {
   const genres = new Set();
-  SONGS.forEach(s => {
-    (s.style || "").split(",").forEach(g => {
-      const t = g.trim();
-      if (t) genres.add(t);
-    });
-  });
+  SONGS.forEach(s => (s.style || "").split(",").forEach(g => {
+    const t = g.trim(); if (t) genres.add(t);
+  }));
   const sel = document.getElementById("genre-filter");
   [...genres].sort().forEach(g => {
     const o = document.createElement("option");
@@ -71,17 +85,17 @@ function renderSongList(query, genre) {
     s.title.toLowerCase().includes(query) ||
     s.artist.toLowerCase().includes(query));
   if (genre) songs = songs.filter(s => (s.style || "").includes(genre));
-
   list.innerHTML = songs.map(s => {
-    const bpm  = s.bpm ? Math.round(s.bpm) + " BPM" : "";
-    const trk  = s.num_tracks ? s.num_tracks + " trk" : "";
-    const act  = s.slug === song?.slug ? " active" : "";
+    const bpm = s.bpm ? Math.round(s.bpm) + " BPM" : "";
+    const trk = s.num_tracks ? s.num_tracks + " trk" : "";
+    const act = s.slug === song?.slug ? " active" : "";
     return `<li class="song-item${act}" data-slug="${s.slug}"
                 onclick="selectSong('${s.slug}')">
       <div class="si-title">${s.artist} — ${s.title}</div>
       <div class="si-meta">${[bpm, trk, s.style?.split(",")[0]].filter(Boolean).join(" · ")}</div>
     </li>`;
-  }).join("") || `<li style="padding:20px 14px;color:var(--muted);font-size:13px">No songs match</li>`;
+  }).join("") ||
+    `<li style="padding:20px 14px;color:var(--muted);font-size:13px">No songs match</li>`;
 }
 
 /* ── Song selection ──────────────────────────────────────── */
@@ -93,19 +107,39 @@ function selectSong(slug) {
     el.classList.toggle("active", el.dataset.slug === slug));
 
   stopAudio();
-  noteData = null;
+  noteData   = null;
+  beatOffset = 0;
 
-  // Default sections: A = bars 1–9, B = bars 17–25 (reasonable starting point)
+  // Default: 4 equal sections
   const nb = song.n_bars ?? 32;
-  secA = { start: 1,          end: Math.min(9,  Math.floor(nb * 0.3)) };
-  secB = { start: Math.min(17, Math.floor(nb * 0.55)),
-           end:   Math.min(25, Math.floor(nb * 0.80)) };
+  const q  = Math.round(nb / 4);
+  markers = [q, q * 2, q * 3].filter(b => b > 0 && b < nb);
 
   renderSongView();
   loadNoteData(slug);
 }
 
-/* ── Piano roll note data ────────────────────────────────── */
+/* ── Sections ────────────────────────────────────────────── */
+function getSections() {
+  const nb  = song?.n_bars ?? 32;
+  const pts = [0, ...markers, nb];
+  return pts.slice(0, -1).map((s, i) => ({ start: s, end: pts[i + 1] }));
+}
+
+function addMarkerAt(bar) {
+  const nb = song?.n_bars ?? 32;
+  const b  = Math.max(1, Math.min(bar, nb - 1));
+  if (markers.some(m => Math.abs(m - b) < 2)) return;
+  markers = [...markers, b].sort((a, c) => a - c);
+  updateTimeline();
+}
+
+function removeMarker(idx) {
+  markers.splice(idx, 1);
+  updateTimeline();
+}
+
+/* ── Piano roll ──────────────────────────────────────────── */
 async function loadNoteData(slug) {
   try {
     const res = await fetch(`notes/${slug}.json`);
@@ -121,62 +155,48 @@ async function loadNoteData(slug) {
 function drawCanvas() {
   const canvas = document.getElementById("tl-canvas");
   if (!canvas) return;
-
-  const bar = canvas.parentElement;
-  const W   = bar.clientWidth;
-  const H   = bar.clientHeight;
-  if (W === 0 || H === 0) return;
-  canvas.width  = W;
-  canvas.height = H;
-
+  const barEl = canvas.parentElement;
+  const W = barEl.clientWidth, H = barEl.clientHeight;
+  if (!W || !H) return;
+  canvas.width = W; canvas.height = H;
   const ctx = canvas.getContext("2d");
-  const nb  = noteData?.n_bars ?? song?.n_bars ?? 32;
 
-  // Background
+  // Always use song.n_bars so notes align with the playhead and ruler
+  const nb = song?.n_bars ?? noteData?.n_bars ?? 32;
+
   ctx.fillStyle = "#1a2030";
   ctx.fillRect(0, 0, W, H);
 
-  // Notes
   if (noteData?.notes?.length) {
-    const pLo    = noteData.pitch_lo ?? 0;
-    const pHi    = noteData.pitch_hi ?? 127;
+    const pLo = noteData.pitch_lo ?? 0, pHi = noteData.pitch_hi ?? 127;
     const pRange = Math.max(pHi - pLo + 1, 1);
     const rowH   = Math.max(1.5, H / pRange);
-
     for (const [pitch, startBar, durBar, tidx] of noteData.notes) {
       const color = noteData.tracks?.[tidx]?.color ?? "#7c3aed";
-      const x  = startBar / nb * W;
-      const w  = Math.max(1.5, durBar / nb * W - 0.5);
-      const yF = 1 - (pitch - pLo) / pRange;
-      const y  = yF * (H - rowH);
+      const x = startBar / nb * W;
+      const w = Math.max(1.5, durBar / nb * W - 0.5);
+      const y = (1 - (pitch - pLo) / pRange) * (H - rowH);
       ctx.fillStyle = color + "bb";
       ctx.fillRect(x, y, w, rowH);
     }
   }
 
-  // Beat grid (subtle, only when not too dense)
   if (nb <= 128) {
-    ctx.strokeStyle = "rgba(255,255,255,0.05)";
-    ctx.lineWidth   = 0.5;
-    for (let b = 0; b < nb; b++) {
+    ctx.strokeStyle = "rgba(255,255,255,0.05)"; ctx.lineWidth = 0.5;
+    for (let b = 0; b < nb; b++)
       for (let beat = 1; beat < 4; beat++) {
         const x = (b + beat / 4) / nb * W;
         ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
       }
-    }
   }
 
-  // Bar lines
-  ctx.strokeStyle = "rgba(255,255,255,0.14)";
-  ctx.lineWidth   = 0.75;
+  ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 0.75;
   for (let b = 1; b < nb; b++) {
     const x = b / nb * W;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
   }
 
-  // 4-bar phrase lines (brighter)
-  ctx.strokeStyle = "rgba(255,255,255,0.32)";
-  ctx.lineWidth   = 1;
+  ctx.strokeStyle = "rgba(255,255,255,0.32)"; ctx.lineWidth = 1;
   for (let b = 0; b <= nb; b += 4) {
     const x = b / nb * W;
     ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
@@ -186,12 +206,10 @@ function drawCanvas() {
 /* ── Song view ───────────────────────────────────────────── */
 function renderSongView() {
   if (!song) return;
-  const main = document.getElementById("main");
-  const nb   = song.n_bars ?? 32;
-  const bpm  = song.bpm ?? 120;
+  const main  = document.getElementById("main");
+  const nb    = song.n_bars ?? 32;
+  const bpm   = song.bpm ?? 120;
   const insts = (song.instruments ?? []).slice(0, 5).join(", ");
-
-  beatOffset = 0;   // reset offset when switching songs
 
   main.innerHTML = `
     <div class="song-header">
@@ -200,48 +218,25 @@ function renderSongView() {
         <span>♩ ${Math.round(bpm)} BPM</span>
         <span>≈ ${nb} bars</span>
         <span>${song.num_tracks ?? "?"} tracks</span>
-        <span>${(song.style||"").split(",")[0]}</span>
+        <span>${(song.style || "").split(",")[0]}</span>
         <span style="color:var(--muted)">${insts}</span>
       </div>
     </div>
 
     <div class="audio-card">
-      <h3>Timeline — drag handles to set sections</h3>
+      <h3>Timeline — double-click to add boundary · drag to move · × to remove</h3>
       <audio id="audio-el" src="${song.audio_url ?? ""}"></audio>
       <div class="timeline-wrap">
         <div class="tl-bar" id="tl-bar">
           <canvas id="tl-canvas"></canvas>
-          <div class="tl-region sec-a" id="tl-reg-a"><span class="region-label">A</span></div>
-          <div class="tl-region sec-b" id="tl-reg-b"><span class="region-label">B</span></div>
+          <div id="tl-sections" aria-hidden="true"></div>
+          <div id="tl-markers"  aria-hidden="true"></div>
           <div class="tl-playhead" id="tl-playhead" style="left:0"></div>
-          <div class="tl-handle a-start" id="h-a-start" title="A start"></div>
-          <div class="tl-handle a-end"   id="h-a-end"   title="A end"></div>
-          <div class="tl-handle b-start" id="h-b-start" title="B start"></div>
-          <div class="tl-handle b-end"   id="h-b-end"   title="B end"></div>
         </div>
         <div class="tl-ruler" id="tl-ruler"></div>
       </div>
 
-      <div class="section-info">
-        <div class="sec-box sec-a-box">
-          <div class="sec-name">Section A</div>
-          <div class="sec-range" id="disp-a">bars — → —</div>
-          <div class="sec-dur"   id="dur-a">— sec</div>
-          <div class="play-row">
-            <button class="btn-play a" onclick="playSection('a')">▶ Play A</button>
-            <button class="btn-play stop" onclick="stopAudio()">■ Stop</button>
-          </div>
-        </div>
-        <div class="sec-box sec-b-box">
-          <div class="sec-name">Section B</div>
-          <div class="sec-range" id="disp-b">bars — → —</div>
-          <div class="sec-dur"   id="dur-b">— sec</div>
-          <div class="play-row">
-            <button class="btn-play b" onclick="playSection('b')">▶ Play B</button>
-            <button class="btn-play stop" onclick="stopAudio()">■ Stop</button>
-          </div>
-        </div>
-      </div>
+      <div id="sections-list" class="sections-list"></div>
 
       <div class="offset-row">
         <span class="offset-label">Beat offset</span>
@@ -252,7 +247,7 @@ function renderSongView() {
       </div>
 
       <button class="btn-add" id="btn-add" onclick="addToQueue()">
-        + Add pair to queue
+        + Add sections to queue
       </button>
     </div>`;
 
@@ -266,7 +261,6 @@ function renderSongView() {
   initDrag();
   updateTimeline();
 
-  // Piano roll canvas — draw placeholder grid now; notes arrive async
   if (canvasRO) canvasRO.disconnect();
   canvasRO = new ResizeObserver(() => drawCanvas());
   canvasRO.observe(document.getElementById("tl-bar"));
@@ -279,114 +273,99 @@ function buildRuler(nBars) {
   if (!ruler) return;
   const step = nBars <= 32 ? 4 : nBars <= 64 ? 8 : 16;
   let html = "";
-  for (let b = 0; b <= nBars; b += step) {
-    const pct = (b / nBars * 100).toFixed(2);
-    html += `<span class="tl-tick" style="left:${pct}%">${b}</span>`;
-  }
+  for (let b = 0; b <= nBars; b += step)
+    html += `<span class="tl-tick" style="left:${(b / nBars * 100).toFixed(2)}%">${b}</span>`;
   ruler.innerHTML = html;
 }
 
 /* ── Timeline update ─────────────────────────────────────── */
 function updateTimeline() {
-  const nb  = song?.n_bars ?? 32;
-  const bpm = song?.bpm    ?? 120;
-  const bar2pct = b => Math.max(0, Math.min(100, b / nb * 100));
-  const bar2sec = b => b * (60 / bpm) * 4;
+  if (!song) return;
+  const nb       = song.n_bars ?? 32;
+  const bpm      = song.bpm ?? 120;
+  const sections = getSections();
+  const b2pct    = b => (b / nb * 100).toFixed(3) + "%";
 
-  // Regions
-  const setRegion = (el, s, e) => {
-    el.style.left  = bar2pct(s) + "%";
-    el.style.width = bar2pct(e - s) + "%";
-  };
-  const ra = document.getElementById("tl-reg-a");
-  const rb = document.getElementById("tl-reg-b");
-  if (ra) setRegion(ra, secA.start, secA.end);
-  if (rb) setRegion(rb, secB.start, secB.end);
+  // Section colour blocks
+  const secEl = document.getElementById("tl-sections");
+  if (secEl) {
+    secEl.innerHTML = sections.map((sec, i) => {
+      const col = SEC_COLORS[i % SEC_COLORS.length];
+      return `<div class="tl-section" style="
+          left:${b2pct(sec.start)};
+          width:${b2pct(sec.end - sec.start)};
+          background:${col.bg};
+          border-left:2px solid ${col.border};
+          border-right:2px solid ${col.border}">
+        <span class="tl-sec-label" style="color:${col.border}">${i + 1}</span>
+      </div>`;
+    }).join("");
+  }
 
-  // Handles
-  const setHandle = (id, bar) => {
-    const el = document.getElementById(id);
-    if (el) el.style.left = bar2pct(bar) + "%";
-  };
-  setHandle("h-a-start", secA.start);
-  setHandle("h-a-end",   secA.end);
-  setHandle("h-b-start", secB.start);
-  setHandle("h-b-end",   secB.end);
+  // Marker handles (boundary lines)
+  const mrkEl = document.getElementById("tl-markers");
+  if (mrkEl) {
+    mrkEl.innerHTML = markers.map((b, i) =>
+      `<div class="tl-marker" data-idx="${i}" style="left:${b2pct(b)}">
+        <div class="tl-marker-line"></div>
+        <button class="tl-marker-del" onclick="removeMarker(${i})" title="Remove">×</button>
+      </div>`
+    ).join("");
 
-  // Text displays
-  const fmt = b => Math.round(b);
-  const fmtSec = s => s.toFixed(1) + "s";
-  const da = document.getElementById("disp-a");
-  const db = document.getElementById("disp-b");
-  const dua = document.getElementById("dur-a");
-  const dub = document.getElementById("dur-b");
-  if (da)  da.textContent  = `bars ${fmt(secA.start)} → ${fmt(secA.end)}  (${fmt(secA.end - secA.start)} bars)`;
-  if (db)  db.textContent  = `bars ${fmt(secB.start)} → ${fmt(secB.end)}  (${fmt(secB.end - secB.start)} bars)`;
-  if (dua) dua.textContent = fmtSec(bar2sec(secA.end - secA.start));
-  if (dub) dub.textContent = fmtSec(bar2sec(secB.end - secB.start));
+    mrkEl.querySelectorAll(".tl-marker").forEach(el => {
+      el.addEventListener("mousedown", e => {
+        if (e.target.classList.contains("tl-marker-del")) return;
+        e.stopPropagation();
+        e.preventDefault();
+        const bar = document.getElementById("tl-bar");
+        drag = {
+          markerIdx: parseInt(el.dataset.idx),
+          rect: bar.getBoundingClientRect(),
+          nb,
+        };
+        document.body.style.cursor = "col-resize";
+      });
+    });
+  }
+
+  // Section chips below timeline
+  const listEl = document.getElementById("sections-list");
+  if (listEl) {
+    listEl.innerHTML = sections.map((sec, i) => {
+      const col    = SEC_COLORS[i % SEC_COLORS.length];
+      const nBars  = sec.end - sec.start;
+      const durSec = (nBars * 60 / bpm * 4).toFixed(1);
+      return `<div class="section-chip" style="border-color:${col.border}55"
+                   onclick="playBars(${sec.start},${sec.end})">
+        <div class="sc-label" style="color:${col.border}">§${i + 1}</div>
+        <div class="sc-range">${sec.start} → ${sec.end}</div>
+        <div class="sc-dur">${nBars} bars · ${durSec}s ▶</div>
+      </div>`;
+    }).join("");
+  }
 }
 
-/* ── Drag handles ────────────────────────────────────────── */
+/* ── Drag / click ────────────────────────────────────────── */
 function initDrag() {
   const bar = document.getElementById("tl-bar");
   if (!bar) return;
 
-  const handles = ["h-a-start", "h-a-end", "h-b-start", "h-b-end"];
-  handles.forEach(id => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    el.addEventListener("mousedown", e => {
-      e.preventDefault();
-      const nb = song?.n_bars ?? 32;
-      const rect = bar.getBoundingClientRect();
-      const type = id.replace("h-", "");  // 'a-start', 'a-end', etc.
-      drag = { type, rect, nb };
-      document.body.style.cursor = "col-resize";
-    });
+  bar.addEventListener("dblclick", e => {
+    if (e.target.closest(".tl-marker")) return;
+    if (!song) return;
+    const nb   = song.n_bars ?? 32;
+    const rect = bar.getBoundingClientRect();
+    const b    = Math.round((e.clientX - rect.left) / rect.width * nb);
+    addMarkerAt(b);
   });
 
-  document.addEventListener("mousemove", e => {
-    if (!drag) return;
-    const nb   = drag.nb;
-    const pct  = Math.max(0, Math.min(1, (e.clientX - drag.rect.left) / drag.rect.width));
-    const bar  = Math.round(pct * nb);
-    const MIN  = 2;  // minimum section width in bars
-    const GAP  = 1;  // minimum gap between A and B in bars
-
-    if (drag.type === "a-start") {
-      secA.start = Math.min(bar, secA.end - MIN);
-    } else if (drag.type === "a-end") {
-      secA.end = Math.max(bar, secA.start + MIN);
-      // Push B forward if needed
-      if (secA.end + GAP > secB.start) {
-        const shift = secA.end + GAP - secB.start;
-        secB.start = Math.min(secB.start + shift, nb - MIN);
-        secB.end   = Math.min(secB.end   + shift, nb);
-      }
-    } else if (drag.type === "b-start") {
-      secB.start = Math.max(bar, secA.end + GAP);
-      secB.start = Math.min(secB.start, secB.end - MIN);
-    } else if (drag.type === "b-end") {
-      secB.end = Math.max(bar, secB.start + MIN);
-      secB.end = Math.min(secB.end, nb);
-    }
-
-    updateTimeline();
-  });
-
-  document.addEventListener("mouseup", () => {
-    if (!drag) return;
-    drag = null;
-    document.body.style.cursor = "";
-  });
-
-  // Click on bar = seek audio
   bar.addEventListener("click", e => {
+    if (e.target.closest(".tl-marker")) return;
     if (!audio || !song) return;
+    const nb   = song.n_bars ?? 32;
+    const bpm  = song.bpm ?? 120;
     const rect = bar.getBoundingClientRect();
     const pct  = (e.clientX - rect.left) / rect.width;
-    const nb   = song.n_bars ?? 32;
-    const bpm  = song.bpm    ?? 120;
     audio.currentTime = pct * nb * (60 / bpm) * 4;
     audio.play().catch(() => {});
   });
@@ -395,11 +374,11 @@ function initDrag() {
 /* ── Playhead ────────────────────────────────────────────── */
 function onTimeUpdate() {
   if (!audio || !song) return;
-  const nb  = song.n_bars ?? 32;
-  const bpm = song.bpm    ?? 120;
+  const nb       = song.n_bars ?? 32;
+  const bpm      = song.bpm ?? 120;
   const totalSec = nb * (60 / bpm) * 4;
-  const pct = (audio.currentTime / totalSec * 100).toFixed(2);
-  const ph  = document.getElementById("tl-playhead");
+  const pct      = (audio.currentTime / totalSec * 100).toFixed(2);
+  const ph = document.getElementById("tl-playhead");
   if (ph) ph.style.left = pct + "%";
 }
 
@@ -408,63 +387,61 @@ function changeBeatOffset(delta) {
   beatOffset = Math.max(-8, Math.min(8, beatOffset + delta));
   const el   = document.getElementById("offset-val");
   const hint = document.getElementById("offset-hint");
-  if (el) el.textContent = `${beatOffset > 0 ? "+" : ""}${beatOffset} beat${Math.abs(beatOffset) !== 1 ? "s" : ""}`;
+  if (el) el.textContent =
+    `${beatOffset > 0 ? "+" : ""}${beatOffset} beat${Math.abs(beatOffset) !== 1 ? "s" : ""}`;
   if (hint) {
     const bpm     = song?.bpm ?? 120;
     const barFrac = beatOffset / 4;
     const secShift = beatOffset * (60 / bpm);
-    hint.textContent = beatOffset === 0
-      ? ""
-      : `(${barFrac > 0 ? "+" : ""}${barFrac.toFixed(2)} bars · ${secShift > 0 ? "+" : ""}${secShift.toFixed(2)}s)`;
+    hint.textContent = beatOffset === 0 ? "" :
+      `(${barFrac > 0 ? "+" : ""}${barFrac.toFixed(2)} bars · ${secShift > 0 ? "+" : ""}${secShift.toFixed(2)}s)`;
   }
 }
 
 /* ── Audio playback ──────────────────────────────────────── */
 function barToSec(bar) {
-  const bpm        = song?.bpm ?? 120;
-  const offsetSec  = beatOffset * (60 / bpm);   // beat offset in seconds
-  return bar * (60 / bpm) * 4 + offsetSec;
+  const bpm = song?.bpm ?? 120;
+  return bar * (60 / bpm) * 4 + beatOffset * (60 / bpm);
 }
 
-function playSection(which) {
+function playBars(startBar, endBar) {
   if (!audio || !song) return;
-  if (!song.audio_url) {
-    alert("No audio file available for this song yet.");
-    return;
-  }
+  if (!song.audio_url) { alert("No audio file available for this song yet."); return; }
   clearTimeout(playStopAt);
-
-  const sec      = which === "a" ? secA : secB;
-  const startSec = Math.max(0, barToSec(sec.start));
-  const endSec   = Math.max(0, barToSec(sec.end));
-
+  const startSec = Math.max(0, barToSec(startBar));
+  const endSec   = Math.max(0, barToSec(endBar));
   audio.currentTime = startSec;
   audio.play().catch(err => console.warn("Play failed:", err));
-
-  // Auto-stop at section end
   playStopAt = setTimeout(() => audio.pause(), (endSec - startSec) * 1000);
 }
 
 function stopAudio() {
   clearTimeout(playStopAt);
-  if (audio) { audio.pause(); }
+  if (audio) audio.pause();
 }
 
 /* ── Queue ───────────────────────────────────────────────── */
 function addToQueue() {
   if (!song) return;
-  const offsetBars = beatOffset / 4;   // beat offset expressed in bars
-  queue.push({
-    slug:        song.slug,
-    artist:      song.artist,
-    title:       song.title,
-    bpm:         song.bpm,
-    midi:        song.midi_path ?? "",
-    secA:        { start: secA.start + offsetBars, end: secA.end + offsetBars },
-    secB:        { start: secB.start + offsetBars, end: secB.end + offsetBars },
+  const offsetBars = beatOffset / 4;
+  const sections   = getSections().map(s => [
+    Math.round(s.start + offsetBars),
+    Math.round(s.end   + offsetBars),
+  ]);
+  // Replace if same slug already in queue, else append
+  const existing = queue.findIndex(q => q.slug === song.slug);
+  const entry = {
+    slug:       song.slug,
+    artist:     song.artist,
+    title:      song.title,
+    bpm:        song.bpm,
+    midi:       song.midi_path ?? "",
+    sections,
     beatOffset,
-    addedAt:     Date.now(),
-  });
+    addedAt:    Date.now(),
+  };
+  if (existing >= 0) queue[existing] = entry;
+  else queue.push(entry);
   renderQueue();
 }
 
@@ -475,7 +452,7 @@ function removeFromQueue(idx) {
 
 function clearQueue() {
   if (!queue.length) return;
-  if (!confirm("Clear all queued pairs?")) return;
+  if (!confirm("Clear all annotated songs?")) return;
   queue = [];
   renderQueue();
 }
@@ -486,10 +463,9 @@ function renderQueue() {
   const btn  = document.getElementById("btn-export");
   if (cnt) cnt.textContent = queue.length;
   if (btn) btn.disabled = queue.length === 0;
-
   if (!list) return;
   if (!queue.length) {
-    list.innerHTML = `<div class="queue-empty">No pairs yet.<br>Select sections and click<br>"Add pair to queue".</div>`;
+    list.innerHTML = `<div class="queue-empty">No songs annotated yet.<br>Mark section boundaries<br>and click "Add sections to queue".</div>`;
     return;
   }
   list.innerHTML = queue.map((q, i) => `
@@ -497,42 +473,29 @@ function renderQueue() {
       <button class="qi-remove" onclick="removeFromQueue(${i})">✕</button>
       <div class="qi-title">${q.artist} — ${q.title}</div>
       <div class="qi-range">
-        <span class="pill a">A ${Math.round(q.secA.start)}→${Math.round(q.secA.end)}</span>
-        <span class="pill b">B ${Math.round(q.secB.start)}→${Math.round(q.secB.end)}</span>
+        <span>${q.sections.length} sections</span>
         ${q.beatOffset ? `<span style="font-size:10px;color:var(--muted)">offset ${q.beatOffset > 0 ? "+" : ""}${q.beatOffset}b</span>` : ""}
+        <span style="font-size:10px;color:var(--muted)">${q.sections.map(s => s.join("→")).join(", ")}</span>
       </div>
     </div>`).join("");
 }
 
 function exportQueue() {
   if (!queue.length) return;
-
-  const pairs = queue.map((q, i) => ({
-    dataset:  "gigamidi",
-    id:       `${q.slug}__pair${i + 1}`,
-    midi:     q.midi,
-    bpm:      q.bpm,
-    sec_a:    [Math.round(q.secA.start), Math.round(q.secA.end)],
-    sec_b:    [Math.round(q.secB.start), Math.round(q.secB.end)],
-  }));
-
-  const config = {
-    _note:       "Generated by midigpt-selector. Feed into unified_transition.py or transition_pipeline.py.",
-    out_dir:     "out/selected_run/runs",
-    n_generations: 2,
-    gap_bars:    4,
-    window_bars: 4,
-    temperature: 0.9,
-    matching:    "group",
-    device:      "cuda",
-    transcribe:  true,
-    exp_id:      "mc13_256_g4_all_v7_mt3f_sqr_rms_moe_wf4_n8k2_silu_rope_rp_b80_ps2",
-    pairs,
+  const payload = {
+    _note:   "Generated by midigpt-selector. Annotated section boundaries for random pair sampling.",
+    catalog: queue.map(q => ({
+      dataset:    "gigamidi",
+      slug:       q.slug,
+      midi:       q.midi,
+      bpm:        q.bpm,
+      beatOffset: q.beatOffset,
+      sections:   q.sections,
+    })),
   };
-
-  const blob = new Blob([JSON.stringify(config, null, 2)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url  = URL.createObjectURL(blob);
-  const a    = Object.assign(document.createElement("a"), { href: url, download: "transition_config.json" });
+  const a    = Object.assign(document.createElement("a"), { href: url, download: "section_catalog.json" });
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -543,9 +506,9 @@ function renderWelcome() {
   document.getElementById("main").innerHTML = `
     <div class="welcome">
       <div class="icon">🎛️</div>
-      <h2>MIDI-GPT Pair Selector</h2>
-      <p>Pick a song from the sidebar, drag the <span style="color:var(--sec-a)">blue (A)</span>
-         and <span style="color:var(--sec-b)">green (B)</span> handles to set your sections,
-         preview with Play buttons, then add pairs to the queue and export.</p>
+      <h2>MIDI-GPT Section Annotator</h2>
+      <p>Pick a song, then <strong>double-click</strong> the timeline to add section boundaries.
+         Drag boundaries to adjust, click a section chip to preview.
+         Add each song's annotations to the queue and export the catalog.</p>
     </div>`;
 }
