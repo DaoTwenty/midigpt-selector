@@ -3,6 +3,8 @@ let SONGS = [];          // from songs.json
 let song  = null;        // currently selected song entry
 let queue = [];          // [{song, secA, secB}, …]
 let audio = null;        // HTMLAudioElement
+let noteData = null;     // loaded from notes/{slug}.json for piano roll
+let canvasRO = null;     // ResizeObserver for canvas
 
 // Sections in BAR units (floats)
 let secA = { start: 0, end: 8 };
@@ -91,6 +93,7 @@ function selectSong(slug) {
     el.classList.toggle("active", el.dataset.slug === slug));
 
   stopAudio();
+  noteData = null;
 
   // Default sections: A = bars 1–9, B = bars 17–25 (reasonable starting point)
   const nb = song.n_bars ?? 32;
@@ -99,6 +102,85 @@ function selectSong(slug) {
            end:   Math.min(25, Math.floor(nb * 0.80)) };
 
   renderSongView();
+  loadNoteData(slug);
+}
+
+/* ── Piano roll note data ────────────────────────────────── */
+async function loadNoteData(slug) {
+  try {
+    const res = await fetch(`notes/${slug}.json`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    noteData = await res.json();
+  } catch (e) {
+    console.warn("No note data for", slug, e.message);
+    noteData = null;
+  }
+  drawCanvas();
+}
+
+function drawCanvas() {
+  const canvas = document.getElementById("tl-canvas");
+  if (!canvas) return;
+
+  const bar = canvas.parentElement;
+  const W   = bar.clientWidth;
+  const H   = bar.clientHeight;
+  if (W === 0 || H === 0) return;
+  canvas.width  = W;
+  canvas.height = H;
+
+  const ctx = canvas.getContext("2d");
+  const nb  = noteData?.n_bars ?? song?.n_bars ?? 32;
+
+  // Background
+  ctx.fillStyle = "#1a2030";
+  ctx.fillRect(0, 0, W, H);
+
+  // Notes
+  if (noteData?.notes?.length) {
+    const pLo    = noteData.pitch_lo ?? 0;
+    const pHi    = noteData.pitch_hi ?? 127;
+    const pRange = Math.max(pHi - pLo + 1, 1);
+    const rowH   = Math.max(1.5, H / pRange);
+
+    for (const [pitch, startBar, durBar, tidx] of noteData.notes) {
+      const color = noteData.tracks?.[tidx]?.color ?? "#7c3aed";
+      const x  = startBar / nb * W;
+      const w  = Math.max(1.5, durBar / nb * W - 0.5);
+      const yF = 1 - (pitch - pLo) / pRange;
+      const y  = yF * (H - rowH);
+      ctx.fillStyle = color + "bb";
+      ctx.fillRect(x, y, w, rowH);
+    }
+  }
+
+  // Beat grid (subtle, only when not too dense)
+  if (nb <= 128) {
+    ctx.strokeStyle = "rgba(255,255,255,0.05)";
+    ctx.lineWidth   = 0.5;
+    for (let b = 0; b < nb; b++) {
+      for (let beat = 1; beat < 4; beat++) {
+        const x = (b + beat / 4) / nb * W;
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+    }
+  }
+
+  // Bar lines
+  ctx.strokeStyle = "rgba(255,255,255,0.14)";
+  ctx.lineWidth   = 0.75;
+  for (let b = 1; b < nb; b++) {
+    const x = b / nb * W;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+
+  // 4-bar phrase lines (brighter)
+  ctx.strokeStyle = "rgba(255,255,255,0.32)";
+  ctx.lineWidth   = 1;
+  for (let b = 0; b <= nb; b += 4) {
+    const x = b / nb * W;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
 }
 
 /* ── Song view ───────────────────────────────────────────── */
@@ -128,6 +210,7 @@ function renderSongView() {
       <audio id="audio-el" src="${song.audio_url ?? ""}"></audio>
       <div class="timeline-wrap">
         <div class="tl-bar" id="tl-bar">
+          <canvas id="tl-canvas"></canvas>
           <div class="tl-region sec-a" id="tl-reg-a"><span class="region-label">A</span></div>
           <div class="tl-region sec-b" id="tl-reg-b"><span class="region-label">B</span></div>
           <div class="tl-playhead" id="tl-playhead" style="left:0"></div>
@@ -182,6 +265,12 @@ function renderSongView() {
   buildRuler(nb);
   initDrag();
   updateTimeline();
+
+  // Piano roll canvas — draw placeholder grid now; notes arrive async
+  if (canvasRO) canvasRO.disconnect();
+  canvasRO = new ResizeObserver(() => drawCanvas());
+  canvasRO.observe(document.getElementById("tl-bar"));
+  drawCanvas();
 }
 
 /* ── Ruler ───────────────────────────────────────────────── */
