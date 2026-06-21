@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MIDI-GPT Pair Selector</title>
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">MIDI-GPT <span>Selector</span></div>
+    <div class="hint">
+      Pick sections A &amp; B → queue pairs → export <code>transition_config.json</code>
+    </div>
+    <div class="spacer"></div>
+    <span style="font-size:12px;color:var(--muted)"><span id="stat-songs">—</span> songs loaded</span>
+  </header>
+
+  <div class="layout">
+
+    <aside id="sidebar">
+      <div class="sidebar-top">
+        <div class="search-wrap">
+          <svg width="14" height="14" viewBox="0 0 20 20" fill="currentColor">
+            <path fill-rule="evenodd" d="M8 4a4 4 0 100 8 4 4 0 000-8zM2 8a6 6 0
+              1110.89 3.476l4.817 4.817a1 1 0 01-1.414 1.414l-4.816-4.816A6 6 0 012 8z"/>
+          </svg>
+          <input id="search" type="text" placeholder="Search artist or title…" autocomplete="off">
+        </div>
+        <div class="filter-row">
+          <label for="genre-filter">Genre</label>
+          <select id="genre-filter">
+            <option value="">All genres</option>
+          </select>
+        </div>
+      </div>
+      <ul id="song-list"></ul>
+    </aside>
+
+    <main id="main">
+      <!-- populated by app.js -->
+    </main>
+
+    <div id="queue-panel">
+      <div class="queue-top">
+        <h3>Queue</h3>
+        <span class="queue-count" id="queue-count">0</span>
+      </div>
+      <div id="queue-list"></div>
+      <div class="queue-actions">
+        <button class="btn-export" id="btn-export" disabled onclick="exportQueue()">
+          ↓ Export transition_config.json
+        </button>
+        <button class="btn-clear" onclick="clearQueue()">Clear queue</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+<script src="assets/app.js"></script>
+</body>
+</html>
