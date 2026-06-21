@@ -6,8 +6,10 @@ let audio      = null;
 let noteData   = null;
 let canvasRO   = null;
 let markers    = [];   // sorted bar positions of internal section boundaries
+let trimStart  = 0;    // first bar of active region (excludes silent lead-in)
+let trimEnd    = null; // last bar of active region, null = song.n_bars
 let beatOffset = 0;
-let drag       = null; // {markerIdx, rect, nb}
+let drag       = null; // {type:'marker'|'trimStart'|'trimEnd', markerIdx?, rect, nb}
 let playStopAt = null;
 
 const SEC_COLORS = [
@@ -44,12 +46,21 @@ document.addEventListener("DOMContentLoaded", async () => {
   document.addEventListener("mousemove", e => {
     if (!drag) return;
     const nb  = drag.nb;
+    const te  = trimEnd ?? nb;
     const pct = Math.max(0, Math.min(1, (e.clientX - drag.rect.left) / drag.rect.width));
-    let b = Math.round(pct * nb);
-    const prev = drag.markerIdx > 0 ? markers[drag.markerIdx - 1] : 0;
-    const next = drag.markerIdx < markers.length - 1 ? markers[drag.markerIdx + 1] : nb;
-    b = Math.max(prev + 2, Math.min(next - 2, b));
-    markers[drag.markerIdx] = b;
+    const b   = Math.round(pct * nb);
+
+    if (drag.type === "trimStart") {
+      trimStart = Math.max(0, Math.min(b, te - 4));
+      markers   = markers.filter(m => m > trimStart && m < te);
+    } else if (drag.type === "trimEnd") {
+      trimEnd = Math.max(trimStart + 4, Math.min(b, nb));
+      markers = markers.filter(m => m > trimStart && m < trimEnd);
+    } else {
+      const prev = drag.markerIdx > 0 ? markers[drag.markerIdx - 1] : trimStart;
+      const next = drag.markerIdx < markers.length - 1 ? markers[drag.markerIdx + 1] : te;
+      markers[drag.markerIdx] = Math.max(prev + 2, Math.min(next - 2, b));
+    }
     updateTimeline();
   });
   document.addEventListener("mouseup", () => {
@@ -109,8 +120,10 @@ function selectSong(slug) {
   stopAudio();
   noteData   = null;
   beatOffset = 0;
+  trimStart  = 0;
+  trimEnd    = null;
 
-  // Default: 4 equal sections
+  // Default: 4 equal sections across the full song
   const nb = song.n_bars ?? 32;
   const q  = Math.round(nb / 4);
   markers = [q, q * 2, q * 3].filter(b => b > 0 && b < nb);
@@ -122,13 +135,16 @@ function selectSong(slug) {
 /* ── Sections ────────────────────────────────────────────── */
 function getSections() {
   const nb  = song?.n_bars ?? 32;
-  const pts = [0, ...markers, nb];
+  const ts  = trimStart;
+  const te  = trimEnd ?? nb;
+  const pts = [ts, ...markers.filter(m => m > ts && m < te), te];
   return pts.slice(0, -1).map((s, i) => ({ start: s, end: pts[i + 1] }));
 }
 
 function addMarkerAt(bar) {
   const nb = song?.n_bars ?? 32;
-  const b  = Math.max(1, Math.min(bar, nb - 1));
+  const te = trimEnd ?? nb;
+  const b  = Math.max(trimStart + 2, Math.min(bar, te - 2));
   if (markers.some(m => Math.abs(m - b) < 2)) return;
   markers = [...markers, b].sort((a, c) => a - c);
   updateTimeline();
@@ -231,6 +247,7 @@ function renderSongView() {
           <canvas id="tl-canvas"></canvas>
           <div id="tl-sections" aria-hidden="true"></div>
           <div id="tl-markers"  aria-hidden="true"></div>
+          <div id="tl-trim"     aria-hidden="true"></div>
           <div class="tl-playhead" id="tl-playhead" style="left:0"></div>
         </div>
         <div class="tl-ruler" id="tl-ruler"></div>
@@ -323,6 +340,32 @@ function updateTimeline() {
           rect: bar.getBoundingClientRect(),
           nb,
         };
+        document.body.style.cursor = "col-resize";
+      });
+    });
+  }
+
+  // Trim overlays + handles
+  const trimEl = document.getElementById("tl-trim");
+  if (trimEl) {
+    const ts = trimStart, te = trimEnd ?? nb;
+    trimEl.innerHTML = `
+      <div class="tl-trim-region" style="left:0;width:${b2pct(ts)}"></div>
+      <div class="tl-trim-region" style="left:${b2pct(te)};right:0"></div>
+      <div class="tl-trim-handle tl-trim-start" data-type="trimStart" style="left:${b2pct(ts)}">
+        <div class="tl-trim-line"></div>
+        <div class="tl-trim-arrow tl-trim-arrow-r">▶</div>
+      </div>
+      <div class="tl-trim-handle tl-trim-end" data-type="trimEnd" style="left:${b2pct(te)}">
+        <div class="tl-trim-line"></div>
+        <div class="tl-trim-arrow tl-trim-arrow-l">◀</div>
+      </div>`;
+
+    trimEl.querySelectorAll(".tl-trim-handle").forEach(el => {
+      el.addEventListener("mousedown", e => {
+        e.stopPropagation(); e.preventDefault();
+        const bar = document.getElementById("tl-bar");
+        drag = { type: el.dataset.type, rect: bar.getBoundingClientRect(), nb };
         document.body.style.cursor = "col-resize";
       });
     });
@@ -430,12 +473,15 @@ function addToQueue() {
   ]);
   // Replace if same slug already in queue, else append
   const existing = queue.findIndex(q => q.slug === song.slug);
+  const nb = song.n_bars ?? 32;
   const entry = {
     slug:       song.slug,
     artist:     song.artist,
     title:      song.title,
     bpm:        song.bpm,
     midi:       song.midi_path ?? "",
+    trimStart:  Math.round(trimStart + offsetBars),
+    trimEnd:    Math.round((trimEnd ?? nb) + offsetBars),
     sections,
     beatOffset,
     addedAt:    Date.now(),
@@ -490,6 +536,8 @@ function exportQueue() {
       midi:       q.midi,
       bpm:        q.bpm,
       beatOffset: q.beatOffset,
+      trimStart:  q.trimStart,
+      trimEnd:    q.trimEnd,
       sections:   q.sections,
     })),
   };
